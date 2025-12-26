@@ -1,0 +1,8 @@
+condor/submit_nano.sh
+condor/__pycache__
+condor/log/*
+condor/*.cc
+condor/eff_*
+condor/batch_submission.sh
+make_plots/make_plots*
+plotters/__pycache__/
