@@ -1,116 +1,291 @@
+#!/usr/bin/env python3
 import ROOT
 import argparse
 import os
-import utils
-from utils import *
+import json
+import math
 
-# Parse arguments
+import numpy as np
+import matplotlib.pyplot as plt
+import mplhep as hep
+from scipy.optimize import curve_fit
+
+import utils
+
+plt.style.use(hep.style.CMS)
+ROOT.gROOT.SetBatch(True)
+
+# ----------------------------------------------------------------------
+# Args
+# ----------------------------------------------------------------------
 parser = argparse.ArgumentParser()
-parser.add_argument('--legend', type=str, help='dataset legend')
-parser.add_argument('-o', type=str, help='output dir')
-parser.add_argument('-i', type=str, help='input dir dir')
+parser.add_argument("--legend", type=str, default="", help="dataset legend (e.g. 2025F, 2024, Run2024B, ...)")
+parser.add_argument("-o", required=True, type=str, help="output dir")
+parser.add_argument("-i", required=True, type=str, help="input dir (contains merged_total.root)")
+parser.add_argument(
+    "--plateau-nbins",
+    type=int,
+    default=6,
+    help="Number of highest-pT bins (with entries) used to estimate plateau (max efficiency). Default: 6",
+)
 args = parser.parse_args()
 
-# Pass arguments
-output_dir = args.o
-input_dir = args.i
-# utils.merge_root_files(input_dir)
+output_dir = args.o.rstrip("/") + "/"
+input_dir = args.i.rstrip("/") + "/"
+os.makedirs(output_dir, exist_ok=True)
 
-in_file = ROOT.TFile(input_dir + "merged_total.root","READ")
+in_path = os.path.join(input_dir, "merged_total.root")
+if not os.path.isfile(in_path):
+    raise FileNotFoundError(f"[ERROR] Missing input file: {in_path}")
 
-WPs = ["L1Mu22_12"]
+in_file = ROOT.TFile(in_path, "READ")
+if not in_file or in_file.IsZombie():
+    raise RuntimeError(f"[ERROR] Could not open: {in_path}")
 
-wp_values = {
-    "L1Mu22_12": {"quality": 12, "pt_l1": 22, "pt_reco": 26},
-}
-
+# ----------------------------------------------------------------------
+# mplhep-friendly labels
+# ----------------------------------------------------------------------
 TFs = {
-    "uGMT": "|#eta| #leq 2.4",
-    "BMTF": "|#eta| #leq 0.83",
-    "OMTF": "0.83 #leq |#eta| #leq 1.24",
-    "EMTF": "1.24 #leq |#eta| #leq 2.4",
-    "BMTF1": "0.00 #leq |#eta| #leq 0.20",
-    "BMTF2": "0.20 #leq |#eta| #leq 0.40",
-    "BMTF3": "0.40 #leq |#eta| #leq 0.55",
-    "BMTF4": "0.55 #leq |#eta| #leq 0.83",
-    "BMTF5": "0.20 #leq |#eta| #leq 0.30",
-    "BMTF6": "0.30 #leq |#eta| #leq 0.55",
-    "OMTF1": "0.83 #leq |#eta| #leq 1.00",
-    "OMTF2": "1.00 #leq |#eta| #leq 1.24",
-    "EMTF1": "1.24 #leq |#eta| #leq 1.40",
-    "EMTF2": "1.40 #leq |#eta| #leq 1.60",
-    "EMTF3": "1.60 #leq |#eta| #leq 1.80",
-    "EMTF4": "1.80 #leq |#eta| #leq 2.10",
-    "EMTF5": "2.10 #leq |#eta| #leq 2.25",
-    "EMTF6": "2.25 #leq |#eta| #leq 2.40",    
+    "uGMT":  r"$|\eta| \leq 2.4$",
+    "BMTF":  r"$|\eta| \leq 0.83$",
+    "OMTF":  r"$0.83 \leq |\eta| \leq 1.24$",
+    "EMTF":  r"$1.24 \leq |\eta| \leq 2.4$",
+    "BMTF1": r"$0.00 \leq |\eta| \leq 0.20$",
+    "BMTF2": r"$0.20 \leq |\eta| \leq 0.40$",
+    "BMTF3": r"$0.40 \leq |\eta| \leq 0.55$",
+    "BMTF4": r"$0.55 \leq |\eta| \leq 0.83$",
+    "BMTF5": r"$0.20 \leq |\eta| \leq 0.30$",
+    "BMTF6": r"$0.30 \leq |\eta| \leq 0.55$",
+    "OMTF1": r"$0.83 \leq |\eta| \leq 1.00$",
+    "OMTF2": r"$1.00 \leq |\eta| \leq 1.24$",
+    "EMTF1": r"$1.24 \leq |\eta| \leq 1.40$",
+    "EMTF2": r"$1.40 \leq |\eta| \leq 1.60$",
+    "EMTF3": r"$1.60 \leq |\eta| \leq 1.80$",
+    "EMTF4": r"$1.80 \leq |\eta| \leq 2.10$",
+    "EMTF5": r"$2.10 \leq |\eta| \leq 2.25$",
+    "EMTF6": r"$2.25 \leq |\eta| \leq 2.40$",
 }
+
 vars_title = {
-    "eta": "#eta_{Reco}",
-    "phi": "#phi_{Reco}",
-    "pt": "p^{#mu,offline}_{T} [GeV]",
-    "pt2": "p^{#mu,offline}_{T} [GeV]",
+    "eta":  r"$\eta^{\mu,\mathrm{offline}}$",
+    "phi":  r"$\phi^{\mu,\mathrm{offline}}$ [rad]",
+    "pt":   r"$p_T^{\mu,\mathrm{offline}}$ [GeV]",
+    "pt2":  r"$p_T^{\mu,\mathrm{offline}}$ [GeV]",
+    # "nPV":  "Number of vertices",
 }
 
-# Create canvas, receive values for margins
-c, L, R, T, B = utils.create_canvas("c")
-dataset_legend, dataset_x1 = get_dataset_legend(args.legend, R)
+FIT_VAR = "pt2"
+WP_PREFIX = "L1Mu22_12"
 
-h_passed = {}
-h_total = {}
-h_eff = {}
+# (only used as text on plot; keep it mpl-friendly)
+quality_label = r"L1T Quality $\geq 12$"
+pt_l1_label   = r"$p_T^{\mu,\mathrm{L1}} \geq 22~\mathrm{GeV}$"
+pt_reco_label = r"$p_T^{\mu,\mathrm{offline}} \geq 26~\mathrm{GeV}$"
 
-## eff vs var
+# ----------------------------------------------------------------------
+# Fit helpers
+# ----------------------------------------------------------------------
+def plateau_from_max_efficiency(teff: ROOT.TEfficiency, nbins_high: int = 6):
+    hP = teff.GetPassedHistogram()
+    hT = teff.GetTotalHistogram()
+    nB = hT.GetNbinsX()
+
+    chosen = []
+    for b in range(nB, 0, -1):
+        t = float(hT.GetBinContent(b))
+        if t <= 0:
+            continue
+        p = float(hP.GetBinContent(b))
+        chosen.append((b, p, t))
+        if len(chosen) >= max(1, nbins_high):
+            break
+
+    if not chosen:
+        return 0.0, 0.0
+
+    effs = [(p / t) for (_, p, t) in chosen if t > 0]
+    A = max(effs) if effs else 0.0
+
+    bmax, pmax, tmax = max(chosen, key=lambda x: (x[1] / x[2]) if x[2] > 0 else -1.0)
+    Aerr = math.sqrt(A * (1.0 - A) / tmax) if tmax > 0 else 0.0
+    return A, Aerr
+
+
+def logistic_fixed_A(x, b, c, A):
+    return A / (1.0 + np.exp(-(x - b) / c))
+
+
+def fit_logistic_fixed_A(x, y, yerr_low, yerr_up, A_fixed, xmin=0.0, xmax=60.0):
+    sigma = np.maximum(yerr_low, yerr_up)
+
+    m = np.isfinite(x) & np.isfinite(y) & np.isfinite(sigma) & (sigma > 0)
+    m &= (x >= xmin) & (x <= xmax)
+    xf, yf, sf = x[m], y[m], sigma[m]
+
+    if xf.size < 5 or A_fixed <= 0.0:
+        return None
+
+    def f(x, b, c):
+        return logistic_fixed_A(x, b, c, A_fixed)
+
+    p0 = (18.0, 2.5)
+    bounds = ([-np.inf, 0.2], [np.inf, 50.0])
+
+    popt, pcov = curve_fit(
+        f, xf, yf,
+        p0=p0,
+        sigma=sf,
+        absolute_sigma=True,
+        bounds=bounds,
+        maxfev=20000,
+    )
+
+    b, c = float(popt[0]), float(popt[1])
+    yfit = f(xf, *popt)
+    chi2 = float(np.sum(((yf - yfit) / sf) ** 2))
+    ndf = int(len(yf) - len(popt))
+
+    return {
+        "b": b,
+        "c": c,
+        "chi2": chi2,
+        "ndf": ndf,
+        "chi2_over_ndf": (chi2 / ndf) if ndf > 0 else None,
+        "cov": pcov,
+    }
+
+
+# ----------------------------------------------------------------------
+# Storage
+# ----------------------------------------------------------------------
+fit_results = {}
+
+# ----------------------------------------------------------------------
+# Main loop (same plotting format as your example)
+# ----------------------------------------------------------------------
 for tf in TFs:
     for var in vars_title:
-        key = "L1Mu22_12_" + var
-        key2 = tf + "_" + var
-        c.SetLogx(0)
-        # values = wp_values[wp]
-        quality_label = f"L1T Quality #geq 12"
-        pt_l1_label = f"p^{{#mu,L1}}_{{T}} #geq 22 GeV"
-        pt_reco_label = f"p^{{#mu,Reco}}_{{T}} #geq 26 GeV"
+        fig, ax = plt.subplots()
 
-        h_passed[tf] = in_file.Get(f"{tf}_{key}_passed")
-        h_passed[tf] = utils.add_overflow(h_passed[tf])
-        h_total[tf] = in_file.Get(f"{tf}_{key}_total")
-        h_total[tf] = utils.add_overflow(h_total[tf])
-        h_eff[tf] = ROOT.TEfficiency(h_passed[tf], h_total[tf])
-        draw_hist(h_eff[tf], CMS_color_0, 20, "")
-        h_eff[tf].SetTitle(";" + vars_title[var] + ";Efficiency")
-        c.Update()
-        graph = h_eff[tf].GetPaintedGraph() 
-        graph.SetMinimum(0)
-        graph.SetMaximum(1.2)
-        if var == "pt":
-            c.SetLogx(1)
-            graph.GetXaxis().SetLimits(1,2000)
-            graph.GetXaxis().SetTitleOffset(1.3)
-        if var == "pt2":
-            graph.GetXaxis().SetLimits(0,60)
-            graph.GetXaxis().SetTitleOffset(1.2)
-        if var == "nPV":
-            graph.GetXaxis().SetLimits(0,70)
-        c.Update()
+        hist_base = f"{tf}_{WP_PREFIX}_{var}"
+        h_passed = in_file.Get(f"{hist_base}_passed")
+        h_total = in_file.Get(f"{hist_base}_total")
 
-        # Create legend
-        leg = ROOT.TLegend(0.61,0.13,0.8,0.38)
-        leg.SetFillStyle(0)
-        leg.AddEntry(h_eff[tf],TFs[tf],"lep")
-        leg.Draw()
+        if not h_passed or not h_total:
+            print(f"[WARN] Could not find {hist_base}_passed/total in file")
+            plt.close(fig)
+            continue
 
-        # Latex
-        utils.add_dataset_legend(dataset_x1, dataset_legend)
-        if var == "phi" or var == "nPV":
-            latex.DrawLatexNDC(0.64, 0.53, quality_label)
-            latex.DrawLatexNDC(0.64, 0.46, pt_l1_label)
-            latex.DrawLatexNDC(0.64, 0.39, pt_reco_label)
+        h_passed = utils.add_overflow(h_passed)
+        h_total = utils.add_overflow(h_total)
+        h_eff = ROOT.TEfficiency(h_passed, h_total)
+
+        x, y, yerr_low, yerr_up, xerr = utils.efficiency_to_vector(h_eff)
+        valid = (y > 0) & (y <= 1)
+
+        ax.errorbar(
+            x[valid], y[valid],
+            xerr=xerr[valid],
+            yerr=[yerr_low[valid], yerr_up[valid]],
+            fmt="o",
+            color="#5790fc",
+            capsize=3,
+            label=TFs[tf],
+            markersize=6,
+            alpha=0.8,
+        )
+
+        ax.set_xlabel(vars_title[var])
+        ax.set_ylabel("Efficiency")
+        ax.set_ylim(0, 1.2)
+        ax.grid(True)
+
+        # CMS label (your utils)
+        if args.legend:
+            utils.add_cms_label(ax, args.legend, loc=2, text="Internal")
         else:
-            latex.DrawLatexNDC(0.64, 0.44, quality_label)
-            latex.DrawLatexNDC(0.64, 0.39, pt_l1_label)
-        utils.add_cms_label_in(L,T)
+            hep.cms.label("Internal", data=True, loc=2, com=13.6, ax=ax)
 
-        c.SaveAs(output_dir + "eff_prefiring_" + key2 + ".png")
-        c.SaveAs(output_dir + "eff_prefiring_" + key2 + ".pdf")
+        ax.legend(loc="lower right", fontsize=17, frameon=False)
 
-# Close input file
+        # show TF eta range (like your template: not for eta itself)
+        if var != "eta":
+            ax.text(0.98, 0.93, TFs[tf], transform=ax.transAxes,
+                    ha="right", va="top", fontsize=22)
+
+        # Axis scaling and limits (same idea as your template)
+        if var == "pt":
+            ax.set_xscale("log")
+            ax.set_xlim(1, 2000)
+        elif var == "pt2":
+            ax.set_xlim(0, 60)
+        elif var == "phi":
+            ax.set_xlim(-3.5, 3.5)
+        elif var == "eta":
+            ax.set_xlim(-2.5, 2.5)
+
+        # Fit only pt2
+        if var == FIT_VAR:
+            A, Aerr = plateau_from_max_efficiency(h_eff, nbins_high=args.plateau_nbins)
+            fit = fit_logistic_fixed_A(x, y, yerr_low, yerr_up, A_fixed=A, xmin=0.0, xmax=60.0)
+
+            if fit is not None:
+                b = fit["b"]
+                cpar = fit["c"]
+                chi2 = fit["chi2"]
+                ndf = fit["ndf"]
+
+                xx = np.linspace(0.0, 60.0, 600)
+                yy = logistic_fixed_A(xx, b, cpar, A)
+                ax.plot(xx, yy, linewidth=2.2, label=r"Fit (A fixed)")
+
+                fit_results[tf] = {
+                    "wp": WP_PREFIX,
+                    "var": var,
+                    "plateau_method": f"max_eff_highbins(n={args.plateau_nbins})",
+                    "A_plateau": float(A),
+                    "A_plateau_err": float(Aerr),
+                    "b": float(b),
+                    "c": float(cpar),
+                    "chi2": float(chi2),
+                    "ndf": int(ndf),
+                    "chi2_over_ndf": float(chi2 / ndf) if ndf > 0 else None,
+                }
+            else:
+                fit_results[tf] = {
+                    "wp": WP_PREFIX,
+                    "var": var,
+                    "plateau_method": f"max_eff_highbins(n={args.plateau_nbins})",
+                    "A_plateau": float(A),
+                    "A_plateau_err": float(Aerr),
+                    "b": None,
+                    "c": None,
+                    "chi2": None,
+                    "ndf": None,
+                    "chi2_over_ndf": None,
+                }
+
+            ax.text(
+                0.25, 0.87,
+                rf"{tf}: $A_\mathrm{{plateau}}$ = {A:.4g} $\pm$ {Aerr:.2g}",
+                transform=ax.transAxes,
+                fontsize=14,
+            )
+            ax.legend(loc="lower right", fontsize=17, frameon=False)
+
+        utils.save_canvas(fig, output_dir, "eff_prefiring", f"{tf}_{var}")
+        plt.close(fig)
+
+# ----------------------------------------------------------------------
+# Write JSON
+# ----------------------------------------------------------------------
+out_json = os.path.join(output_dir, "eff_turnon_params_by_TF.json")
+with open(out_json, "w") as fjson:
+    json.dump(fit_results, fjson, indent=2, sort_keys=True)
+
 in_file.Close()
+print(f"[OK] All plots created successfully! Stored in {output_dir}")
+print(f"[OK] Wrote efficiency plateau+fit parameters to: {out_json}")
+
+
+

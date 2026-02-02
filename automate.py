@@ -161,5 +161,5 @@ if __name__ == "__main__":
 
     # Generate scripts
     generate_batch_submission_script(output_base_dir)
-    generate_make_plots_script(output_base_dir)
-    generate_make_plots_scripts(output_base_dir)
+    # generate_make_plots_script(output_base_dir)
+    # generate_make_plots_scripts(output_base_dir)
