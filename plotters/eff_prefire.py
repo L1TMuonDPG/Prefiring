@@ -68,7 +68,7 @@ TF_BINS = [
 
 # labels
 X_TITLE_PT  = r"$p_T^{\mu,\mathrm{offline}}$ [GeV]"
-# IMPORTANT: you are using signed-eta TEff histos -> use signed label:
+# signed eta for per-TF turn-ons
 X_TITLE_ETA = r"$\eta^{\mu,\mathrm{offline}}$"
 
 # -------------------- COLORS (mpl-friendly) --------------------
@@ -238,7 +238,6 @@ def plot_turnon(eff, tfkey, eta_min, eta_max, outgroup, outtag, xlabel, xlim=Non
             transform=ax.transAxes, fontsize=13, ha="left", va="top")
 
     if do_fit:
-        # A_for_fit is passed in (integral prefiring prob)
         A_prefire = float(A_for_fit) if A_for_fit is not None else 0.0
 
         b = cpar = None
@@ -264,6 +263,7 @@ def plot_overlay_allTF(xvar: str, xlabel: str, outgroup: str, outname: str,
                        xlim=None, remove_yerr=False, remove_xerr=False):
     """
     Overlay all TF curves on one axes (no 'inclusive' branch needed).
+    (kept for pT overlay)
     """
     fig, ax = plt.subplots(figsize=(12, 8))
 
@@ -335,9 +335,76 @@ def plot_overlay_allTF(xvar: str, xlabel: str, outgroup: str, outname: str,
 
     ax.text(0.98, 0.94, args.year, transform=ax.transAxes, ha="right", va="top", fontsize=16)
     ax.text(0.98, 0.88, rf"L1 $p_T > {PTCUT}$ GeV", transform=ax.transAxes, ha="right", va="top", fontsize=16)
-    ax.text(0.98, 0.82, rf"L1 quality $\geq {args.quality}$", transform=ax.transAxes, ha="right", va="top", fontsize=16)
+    ax.text(0.98, 0.82, rf"L1 quality $\geq {args.quality}$",
+            transform=ax.transAxes, ha="right", va="top", fontsize=16)
 
-    ax.legend(ncol=2, fontsize=10, frameon=False, loc="upper left", bbox_to_anchor=(0.02, 0.60))
+    utils.save_canvas(fig, outdir, outgroup, f"{outname}_2025")
+    plt.close(fig)
+
+def plot_eta_inclusive_onepoint_per_TF(eta_probs: dict, outgroup: str, outname: str):
+    """
+    One point per TF for eta:
+      y  = sum(passed)/sum(total) from the ETA TEfficiency histogram
+      x  = center of TF |eta| range
+      xerr = half-width of TF |eta| range
+    """
+    xs, xerrs, ys, yerrs, cols = [], [], [], [], []
+
+    for tfkey, (eta_min, eta_max) in TF_BINS:
+        p, e = eta_probs.get(tfkey, (None, None))
+        if p is None:
+            continue
+
+        x  = 0.5 * (eta_min + eta_max)
+        xe = 0.5 * (eta_max - eta_min)
+
+        xs.append(x)
+        xerrs.append(xe)
+        ys.append(p)
+        yerrs.append(e)
+        cols.append(color_for_tf(tfkey))
+
+    if len(xs) == 0:
+        print("[WARN] No points to draw for eta inclusive one-point plot")
+        return
+
+    xs = np.array(xs, dtype=float)
+    xerrs = np.array(xerrs, dtype=float)
+    ys = np.array(ys, dtype=float)
+    yerrs = np.array(yerrs, dtype=float)
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    for x, xe, y, ye, c in zip(xs, xerrs, ys, yerrs, cols):
+        ax.errorbar(
+            x, y,
+            xerr=xe,
+            yerr=ye,
+            fmt="o",
+            markersize=7,
+            capsize=3,
+            elinewidth=1.2,
+            alpha=0.95,
+            color=c,
+        )
+
+    ax.set_xlabel(r"$|\eta^{\mu,\mathrm{offline}}|$")
+    ax.set_ylabel("Prefiring Probability")
+    ax.grid(True, axis="y", alpha=0.6)
+
+    ymax = float(np.max(ys + yerrs))
+    ax.set_xlim(0.0, 2.5)
+    ax.set_ylim(0.0, max(1e-5, 1.25 * ymax))
+
+    if args.legend:
+        utils.add_cms_label(ax, args.legend, loc=2, text="Internal")
+    else:
+        hep.cms.label("Internal", data=True, loc=2, com=13.6, ax=ax)
+
+    ax.text(0.98, 0.94, args.year, transform=ax.transAxes, ha="right", va="top", fontsize=16)
+    ax.text(0.98, 0.88, rf"L1 $p_T > {PTCUT}$ GeV", transform=ax.transAxes, ha="right", va="top", fontsize=16)
+    ax.text(0.98, 0.82, rf"L1 quality $\geq {args.quality}$",
+            transform=ax.transAxes, ha="right", va="top", fontsize=16)
 
     utils.save_canvas(fig, outdir, outgroup, f"{outname}_2025")
     plt.close(fig)
@@ -352,8 +419,18 @@ for tfkey, _ in TF_BINS:
     p, e = integral_prob(eff_pt)
     bin_probs[tfkey] = (p, e)
 
+# -------------------- compute per-TF prefiring probabilities (from ETA efficiencies) --------------------
+eta_probs = {}
+for tfkey, _ in TF_BINS:
+    eff_eta, _ = fetch_efficiency_strict(base_eta(PTCUT, tfkey))
+    if not eff_eta:
+        eta_probs[tfkey] = (None, None)
+        continue
+    p, e = integral_prob(eff_eta)
+    eta_probs[tfkey] = (p, e)
+
 # ============================================================================
-# 1) SUMMARY PLOT  (Prefire prob vs eta bins)
+# 1) SUMMARY PLOT  (Prefire prob vs eta bins)  (from pT efficiencies)
 # ============================================================================
 labels = [rf"${a:.2f} < |\eta| < {b:.2f}$" for _, (a, b) in TF_BINS]
 n = len(labels)
@@ -368,22 +445,6 @@ else:
 
     y = np.arange(n)
     ax.invert_yaxis()
-
-    idx_bmtf = [i for i, (k, _) in enumerate(TF_BINS) if region_of(k) == "BMTF"]
-    idx_omtf = [i for i, (k, _) in enumerate(TF_BINS) if region_of(k) == "OMTF"]
-    idx_emtf = [i for i, (k, _) in enumerate(TF_BINS) if region_of(k) == "EMTF"]
-
-    # def add_band(indices, region_name):
-    #     if not indices:
-    #         return
-    #     i0, i1 = min(indices), max(indices)
-    #     ax.axhspan(i0 - 0.5, i1 + 0.5, color=REGION_FILL[region_name], alpha=0.10, zorder=0)
-    #     ax.text(0.985, (i0 + i1) / 2.0 / max(1, (n - 1)), region_name,
-    #             transform=ax.transAxes, ha="right", va="center", fontsize=12, alpha=0.9)
-
-    # add_band(idx_bmtf, "BMTF")
-    # add_band(idx_omtf, "OMTF")
-    # add_band(idx_emtf, "EMTF")
 
     point_colors = [color_for_tf(k) for k, _ in TF_BINS]
     for i in range(n):
@@ -447,7 +508,7 @@ for tfkey, (eta_min, eta_max) in TF_BINS:
         with open(os.path.join(outdir, f"prefire_perbin_pt_{tfkey}.json"), "w") as fout:
             json.dump(payload, fout, indent=2, sort_keys=False)
 
-    # eta: points only (NO Y ERROR BARS)
+    # eta: points only (NO Y ERROR BARS) -- keep signed eta here
     eff_eta, baseeta = fetch_efficiency_strict(base_eta(PTCUT, tfkey))
     if eff_eta:
         plot_turnon(
@@ -475,7 +536,9 @@ for tfkey, (eta_min, eta_max) in TF_BINS:
             json.dump(payload, fout, indent=2, sort_keys=False)
 
 # ============================================================================
-# 3) OVERLAY PLOTS (all TF curves on one pad; no inclusive branch needed)
+# 3) OVERLAY PLOTS
+#    - keep pT overlay as before
+#    - replace eta overlay with ONE POINT PER TF (integrated over eta bins)
 # ============================================================================
 plot_overlay_allTF(
     xvar="pt",
@@ -486,13 +549,10 @@ plot_overlay_allTF(
     remove_yerr=False,
 )
 
-plot_overlay_allTF(
-    xvar="eta",
-    xlabel=X_TITLE_ETA,
-    outgroup="overlay_allTF",
-    outname="overlay_eta_allTF_noYerr",
-    xlim=None,
-    remove_yerr=True,   # <<< key
+plot_eta_inclusive_onepoint_per_TF(
+    eta_probs=eta_probs,
+    outgroup="inclusive_eta_onepoint",
+    outname="inclusive_eta_onepoint_perTF",
 )
 
 # Global JSON
@@ -503,7 +563,8 @@ with open(out_all_json, "w") as fout:
 f.Close()
 print(f"[OK] Plots saved to {outdir}")
 print(f"[OK] Wrote per-bin JSONs (pt/eta) to: {outdir}")
-print(f"[OK] Global per-bin JSON: {out_all_json}")
+
+
 
 
 
